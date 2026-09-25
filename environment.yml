@@ -1,0 +1,13 @@
+name: tsai
+channels:
+- fastai
+- pytorch
+- fastchan
+- conda-forge
+- defaults
+dependencies:
+- fastai>=2.7.9
+- pyts>=0.12.0
+- imbalanced-learn>=0.8.0
+- psutil>=5.4.8
+- pytorch>=1.7.0

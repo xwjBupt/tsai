@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.pth
+*.pt
+*.csv
+.ipynb_checkpoints/
+*.log
