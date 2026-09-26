@@ -2,7 +2,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pth
+*.json
 *.pt
 *.csv
 .ipynb_checkpoints/
 *.log
+*.npz
+/home/wjx/CodeData/code/tsai-main/star-bio/outputs/*
