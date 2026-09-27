@@ -1,0 +1,13 @@
+loguru>=0.7
+tensorboard>=2.14
+matplotlib>=3.8
+h5py>=3.9
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.7,<1.8
+tqdm>=4.65
+fastai>=2.8.7
+fastcore>=1.13.2
+psutil>=6.1
+pyts>=0.13
+imbalanced-learn>=0.14

@@ -17,6 +17,32 @@ conda activate nnunet_seg
 cd /home/wjx/CodeData/code/tsai-main
 ```
 
+## 实验模式、时间戳和 Git 记录
+
+每次运行都会创建唯一实验目录，目录名以 `YY-MM-DD@HH-MM-SS` 开头：
+
+```text
+debug/YY-MM-DD@HH-MM-SS+debug/       # 调试实验，不 git commit
+outputs/YY-MM-DD@HH-MM-SS+commit-HASH/ # 正式实验，先提交 star-bio 代码
+```
+
+调试时加 `--debug`，结果写到 `star-bio/debug/`，不会运行 git 命令：
+
+```bash
+python star-bio/train_patchtst.py --debug --fold 1 --epochs 1 \
+  --limit-per-class 1 --device cpu
+```
+
+正式模式是默认模式。启动时只提交 `star-bio/` 下的代码，commit message 记录实验时间；随后实验输出写入 `star-bio/outputs/`，不会加入该 commit。正式模式需要当前 git 仓库已配置用户名/邮箱且允许提交，否则程序会在训练前报错。
+
+TensorBoard event 文件放在实验根目录下，以同一个时间戳和 commit 信息命名，例如：
+
+```text
+outputs/YY-MM-DD@HH-MM-SS+commit-HASH/tensorboard/YY-MM-DD@HH-MM-SS+HASH/fold1/events.out.tfevents...
+```
+
+这样多个实验可一起加载到 TensorBoard 时按时间戳区分曲线。可指定 `--output-root` 更换 `debug/` 或 `outputs/` 的父目录；实验时间戳目录仍会自动创建。
+
 依赖检查：
 
 ```bash
@@ -31,7 +57,7 @@ PY
 如果缺少 tsai 运行依赖：
 
 ```bash
-python -m pip install fastai fastcore psutil pyts imbalanced-learn
+python -m pip install -r star-bio/requirements.txt
 ```
 
 ## 缓存
@@ -55,31 +81,37 @@ python star-bio/train_patchtst.py \
   --output star-bio/outputs/smoke
 ```
 
-## 单折 GPU 测试
+## 单卡 GPU 训练
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 \
-torchrun --standalone --nproc_per_node=2 \
-  star-bio/train_patchtst.py \
-  --fold 1 --epochs 30 --batch-size 32 --workers 4 \
-  --device cuda --backend nccl \
+python star-bio/train_patchtst.py \
+  --fold 1 --epochs 30 --workers 4 \
+  --gpu-id 0 --device cuda \
   --output star-bio/outputs/fold1
 ```
 
-## 8 卡正式实验
+## 8 张 GPU 轮流训练
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-torchrun --standalone --nproc_per_node=8 \
-  star-bio/train_patchtst.py \
-  --all-folds --epochs 100 --batch-size 32 --workers 4 \
-  --device cuda --backend nccl \
+python star-bio/train_patchtst.py \
+  --all-folds --epochs 300 --workers 4 \
+  --gpu-id 0 --device cuda \
   --patch-len 32 --stride 16 --layers 3 --heads 8 \
   --d-model 128 --d-ff 256 \
-  --output star-bio/outputs/patchtst_lobo_v1
+  --output star-bio/outputs/patchtst_lobo_v2
 ```
 
-`--batch-size` 是每张 GPU 的 batch size，总 batch size 约为 `batch-size × GPU 数`。省略它时，脚本按每张 GPU 自动探测。`--all-folds` 会轮流将每个实际批次作为测试批次；验证批次默认使用排序后的下一个批次。
+每次训练只使用一张 GPU。`--gpu-id 0` 指定 GPU 0；省略 `--gpu-id` 时自动选择当前空闲显存最多的 GPU。省略 `--batch-size` 时，脚本用真实前向和反向逐步探测 batch size，默认目标显存占用约 92%，并细化到最后一个可行整数 batch。`--memory-target 0.95` 可提高目标占用，`--auto-batch-max 4096` 控制上限。8 张 GPU 可以分别启动 8 个独立实验进程，但不要使用 `torchrun`。
+
+TensorBoard 默认开启，每个 fold 写入 `fold*/tensorboard/`：
+
+```bash
+tensorboard --logdir star-bio/outputs/patchtst_lobo_v2/fold1/tensorboard --port 6006
+```
+
+如果希望在 8 张 GPU 上同时跑 8 个相互独立的 fold 或实验，可分别启动 8 个普通 Python 进程，并给每个进程传递不同的 `--gpu-id` 和输出目录；不要使用 `torchrun`。
+
+默认最大训练轮数为 300，默认早停耐心为 40。每折每个 epoch 会记录训练 loss、验证 loss、Accuracy、Balanced Accuracy、Macro-F1、宏平均 precision/recall、每个类别的 precision/recall/F1、学习率和混淆矩阵。`history.json` 仍是原有的 JSON 数组格式；同时生成 `history.csv`（扁平化的全部指标）和 `curves.png`（loss、学习率、宏指标、逐类 F1 曲线）。终端日志由 Loguru 输出，只在 rank 0 显示，避免多卡重复刷屏。
 
 ## 评估和推理
 
