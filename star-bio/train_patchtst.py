@@ -116,6 +116,63 @@ def prepare_experiment(args):
     save_json(experiment_root / "experiment.json", metadata)
     return experiment_root, metadata
 
+
+def append_results_csv(results, labels, experiment_meta, output_path=None):
+    """Append a completed four-fold test summary to the fixed results file."""
+    if experiment_meta["debug"] or len(results) != 4:
+        return None
+    result_path = Path(output_path) if output_path else Path(__file__).resolve().parent / "results.csv"
+    fold_keys = [f"fold{key}" for key in sorted(results)]
+    metric_values = {
+        "ACC": lambda item: item["acc"],
+        "Balanced_Accuracy": lambda item: item["bacc"],
+        "Macro_F1": lambda item: item["macro_f1"],
+        "Macro_Precision": lambda item: item["report"]["macro avg"]["precision"],
+        "Macro_Recall": lambda item: item["report"]["macro avg"]["recall"],
+        "Weighted_F1": lambda item: item["report"]["weighted avg"]["f1-score"],
+        "Weighted_Precision": lambda item: item["report"]["weighted avg"]["precision"],
+        "Weighted_Recall": lambda item: item["report"]["weighted avg"]["recall"],
+    }
+    if all("test_loss" in item or "val_loss" in item for item in results.values()):
+        metric_values["Test_Loss"] = lambda item: item.get("test_loss", item.get("val_loss"))
+    for label in labels:
+        metric_values[f"{label}_Precision"] = lambda item, name=label: item["report"][name]["precision"]
+        metric_values[f"{label}_Recall"] = lambda item, name=label: item["report"][name]["recall"]
+        metric_values[f"{label}_F1"] = lambda item, name=label: item["report"][name]["f1-score"]
+        metric_values[f"{label}_Support"] = lambda item, name=label: item["report"][name]["support"]
+    rows = []
+    for metric, getter in metric_values.items():
+        values = [float(getter(results[int(key[4:])])) for key in fold_keys]
+        row = {
+            "experiment_id": experiment_meta["experiment_id"],
+            "timestamp": experiment_meta["timestamp"],
+            "commit": experiment_meta["commit"] or "",
+            "metric": metric,
+        }
+        row.update({key: value for key, value in zip(fold_keys, values)})
+        row["AVG"] = float(np.mean(values))
+        row["STD"] = float(np.std(values))
+        rows.append(row)
+    fieldnames = ["experiment_id", "timestamp", "commit", "metric", *fold_keys, "AVG", "STD"]
+    previous_rows = []
+    previous_fields = []
+    if result_path.exists() and result_path.stat().st_size > 0:
+        with result_path.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            previous_fields = reader.fieldnames or []
+            previous_rows = list(reader)
+    merged_fields = list(dict.fromkeys([*previous_fields, *fieldnames]))
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = result_path.with_suffix(result_path.suffix + ".tmp")
+    with temp_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=merged_fields)
+        writer.writeheader()
+        writer.writerows(previous_rows)
+        writer.writerows(rows)
+    os.replace(temp_path, result_path)
+    logger.info("四折结果已追加到 {}，共 {} 项指标", result_path, len(rows))
+    return result_path
+
 def lr_at(cfg, epoch):
     warm = min(cfg.warmup_epochs, max(0, cfg.epochs - 1))
     if warm and epoch <= warm: return cfg.lr * epoch / warm
@@ -297,13 +354,16 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     model.load_state_dict(ck["model"])
     result=gather_eval(model,loaders["test"],device,cfg.labels)
     if main_process():
+        result["test_loss"] = result.pop("val_loss")
         result.update(test_batch=test_batch,val_batch=val_batch,best_val_f1=best); save_json(out/"test_metrics.json",result); print(json.dumps({k:v for k,v in result.items() if k not in ("cm","report")},ensure_ascii=False))
     if writer: writer.close()
+    return result
 
 def main():
     p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(); g.add_argument("--fold",type=int); g.add_argument("--all-folds",action="store_true"); p.add_argument("--val-batch",type=int); p.add_argument("--data-root",default=Config().data_root); p.add_argument("--cache",default=Config().cache_path); p.add_argument("--output-root",help="实验父目录，实验名会自动追加时间戳"); p.add_argument("--epochs",type=int,default=300); p.add_argument("--batch-size",type=int); p.add_argument("--workers",type=int,default=4); p.add_argument("--lr",type=float,default=2e-4); p.add_argument("--patience",type=int,default=40); p.add_argument("--tsai-root",default="/home/wjx/CodeData/code/tsai-main"); p.add_argument("--patch-len",type=int,default=32); p.add_argument("--stride",type=int,default=16); p.add_argument("--layers",type=int,default=3); p.add_argument("--heads",type=int,default=8); p.add_argument("--d-model",type=int,default=128); p.add_argument("--d-ff",type=int,default=256); p.add_argument("--dropout",type=float,default=.1); p.add_argument("--limit-per-class",type=int); p.add_argument("--auto-batch-start",type=int,default=8); p.add_argument("--auto-batch-max",type=int,default=4096); p.add_argument("--memory-target",type=float,default=.92); p.add_argument("--gpu-id",type=int); p.add_argument("--tensorboard",action=argparse.BooleanOptionalAction,default=True); p.add_argument("--debug",action=argparse.BooleanOptionalAction,default=False,help="debug 模式写入 debug/，不执行 git commit"); p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
     a=p.parse_args(); os.environ["PATCHTST_DEVICE"]=a.device; device=select_gpu(a); setup_logger(); experiment_root, experiment_meta=prepare_experiment(a); logger.info("实验={} debug={} commit={} device={} epochs={} data={}", experiment_meta["experiment_id"], experiment_meta["debug"], experiment_meta["commit"] or "none", device, a.epochs, a.data_root); meta=load_meta(a.cache,check_sources=True,data_root=a.data_root); folds=meta["batch_values"] if a.all_folds else [a.fold or meta["batch_values"][0]]
     for fold in folds: make_splits(meta,fold,a.val_batch)
-    for fold in folds: run(a,fold,meta,device,experiment_root,experiment_meta)
+    fold_results = {fold: run(a, fold, meta, device, experiment_root, experiment_meta) for fold in folds}
+    append_results_csv(fold_results, meta["labels"], experiment_meta)
     cleanup_ddp()
 if __name__=="__main__": main()
