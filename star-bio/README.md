@@ -35,7 +35,7 @@ python star-bio/train_patchtst.py --debug --fold 1 --epochs 1 \
 
 正式模式是默认模式。启动时只提交 `star-bio/` 下的代码，commit message 记录实验时间；随后实验输出写入 `star-bio/outputs/`，不会加入该 commit。正式模式需要当前 git 仓库已配置用户名/邮箱且允许提交，否则程序会在训练前报错。
 
-正式 `--all-folds` 实验的四折测试完成后，会将本次各项测试指标追加到 `star-bio/results.csv`。每项指标一行，含实验 ID、时间戳、commit、各实际 fold 列、四折简单算术平均 `AVG` 和标准差 `STD`。记录包括 ACC、Balanced Accuracy、宏/加权 Precision、Recall、F1、测试 loss，以及各类别的 Precision、Recall、F1 和 support。单折实验和 `--debug` 实验不追加汇总。
+正式 `--all-folds` 实验的四折测试完成后，会将本次各项测试指标追加到 `/home/wjx/CodeData/code/tsai-main/star-bio/results.csv`。每项指标一行，含实验 ID、时间戳、commit、各实际 fold 列、四折简单算术平均 `AVG` 和标准差 `STD`。记录包括 ACC、Balanced Accuracy、宏/加权 Precision、Recall、F1、测试 loss，以及各类别的 Precision、Recall、F1 和 support。单折实验和 `--debug` 实验不追加汇总。CSV 更新采用进程锁和原子替换，可避免多个单卡实验同时结束时互相覆盖。此前已有的 `patchtst_lobo_v1` 会以 `legacy-patchtst_lobo_v1` 名称补录；更早结果没有测试 loss 时该指标留空。
 
 TensorBoard event 文件放在实验根目录下，以同一个时间戳和 commit 信息命名，例如：
 

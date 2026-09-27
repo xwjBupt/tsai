@@ -1,5 +1,6 @@
 """Train tsai PatchTST on the Cell cache using exactly one GPU per process."""
 import argparse
+import fcntl
 from dataclasses import asdict
 import json
 import math
@@ -9,6 +10,7 @@ import random
 import sys
 import csv
 import subprocess
+import tempfile
 from datetime import datetime
 
 import numpy as np
@@ -132,9 +134,8 @@ def append_results_csv(results, labels, experiment_meta, output_path=None):
         "Weighted_F1": lambda item: item["report"]["weighted avg"]["f1-score"],
         "Weighted_Precision": lambda item: item["report"]["weighted avg"]["precision"],
         "Weighted_Recall": lambda item: item["report"]["weighted avg"]["recall"],
+        "Test_Loss": lambda item: item.get("test_loss"),
     }
-    if all("test_loss" in item or "val_loss" in item for item in results.values()):
-        metric_values["Test_Loss"] = lambda item: item.get("test_loss", item.get("val_loss"))
     for label in labels:
         metric_values[f"{label}_Precision"] = lambda item, name=label: item["report"][name]["precision"]
         metric_values[f"{label}_Recall"] = lambda item, name=label: item["report"][name]["recall"]
@@ -142,34 +143,47 @@ def append_results_csv(results, labels, experiment_meta, output_path=None):
         metric_values[f"{label}_Support"] = lambda item, name=label: item["report"][name]["support"]
     rows = []
     for metric, getter in metric_values.items():
-        values = [float(getter(results[int(key[4:])])) for key in fold_keys]
+        raw_values = [getter(results[int(key[4:])]) for key in fold_keys]
+        values = [float(value) if value is not None else None for value in raw_values]
+        complete = all(value is not None for value in values)
         row = {
             "experiment_id": experiment_meta["experiment_id"],
             "timestamp": experiment_meta["timestamp"],
             "commit": experiment_meta["commit"] or "",
             "metric": metric,
         }
-        row.update({key: value for key, value in zip(fold_keys, values)})
-        row["AVG"] = float(np.mean(values))
-        row["STD"] = float(np.std(values))
+        row.update({key: value if value is not None else "" for key, value in zip(fold_keys, values)})
+        row["AVG"] = float(np.mean(values)) if complete else ""
+        row["STD"] = float(np.std(values)) if complete else ""
         rows.append(row)
     fieldnames = ["experiment_id", "timestamp", "commit", "metric", *fold_keys, "AVG", "STD"]
-    previous_rows = []
-    previous_fields = []
-    if result_path.exists() and result_path.stat().st_size > 0:
-        with result_path.open(newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            previous_fields = reader.fieldnames or []
-            previous_rows = list(reader)
-    merged_fields = list(dict.fromkeys([*previous_fields, *fieldnames]))
     result_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = result_path.with_suffix(result_path.suffix + ".tmp")
-    with temp_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=merged_fields)
-        writer.writeheader()
-        writer.writerows(previous_rows)
-        writer.writerows(rows)
-    os.replace(temp_path, result_path)
+    lock_key = str(result_path.resolve()).encode("utf-8")
+    lock_name = __import__("hashlib").sha256(lock_key).hexdigest()
+    lock_path = Path(tempfile.gettempdir()) / f"star-bio-results-{lock_name}.lock"
+    with lock_path.open("a") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        previous_rows = []
+        previous_fields = []
+        if result_path.exists() and result_path.stat().st_size > 0:
+            with result_path.open(newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                previous_fields = reader.fieldnames or []
+                previous_rows = [row for row in reader if row.get("experiment_id") != experiment_meta["experiment_id"]]
+        merged_fields = list(dict.fromkeys([*previous_fields, *fieldnames]))
+        with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8",
+                                         dir=result_path.parent,
+                                         prefix=result_path.name + ".", suffix=".tmp",
+                                         delete=False) as f:
+            temp_path = Path(f.name)
+            writer = csv.DictWriter(f, fieldnames=merged_fields)
+            writer.writeheader()
+            writer.writerows(previous_rows)
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, result_path)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     logger.info("四折结果已追加到 {}，共 {} 项指标", result_path, len(rows))
     return result_path
 
