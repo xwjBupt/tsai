@@ -115,6 +115,26 @@ tensorboard --logdir star-bio/outputs/patchtst_lobo_v2/fold1/tensorboard --port 
 
 默认最大训练轮数为 300，默认早停耐心为 40。每折每个 epoch 会记录训练 loss、验证 loss、Accuracy、Balanced Accuracy、Macro-F1、宏平均 precision/recall、每个类别的 precision/recall/F1、学习率和混淆矩阵。`history.json` 仍是原有的 JSON 数组格式；同时生成 `history.csv`（扁平化的全部指标）和 `curves.png`（loss、学习率、宏指标、逐类 F1 曲线）。终端日志由 Loguru 输出，只在 rank 0 显示，避免多卡重复刷屏。
 
+## 八卡并行对比实验
+
+`star-bio/launch_8_compare.sh` 会让 8 个普通 Python 进程分别绑定 GPU 0 到 GPU 7，每个进程运行完整的四 fold 实验。它不会使用 `torchrun`，每个实验有独立输出和日志。默认是 debug 模式，不执行 git commit：
+
+```bash
+cd /home/wjx/CodeData/code/tsai-main
+conda activate nnunet_seg
+bash star-bio/launch_8_compare.sh
+```
+
+默认八个配置为：联合类别/批次采样基线、关闭批次增强、类别采样、均匀采样、较弱增强、较强增强、patch 长度 16、patch 长度 64。结果分别写入 `star-bio/compare_runs/<name>/`，日志写入 `star-bio/compare_logs/`。
+
+正式并行实验先只提交一次代码，八个进程共享同一个 commit：
+
+```bash
+MODE=formal EPOCHS=300 bash star-bio/launch_8_compare.sh
+```
+
+正式实验会为每个配置创建带时间戳和共享 commit 的目录，并在每个四 fold 实验结束后追加汇总到 `star-bio/results.csv`。如果只想改变配置，可编辑启动脚本中的 `configs` 数组；每一行依次是 GPU、实验名、采样策略、批次增强、增强强度、patch 长度、stride、模型维度和层数。
+
 ## 评估和推理
 
 ```bash
