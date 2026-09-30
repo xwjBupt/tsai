@@ -8,4 +8,8 @@ __pycache__/
 .ipynb_checkpoints/
 *.log
 *.npz
-/home/wjx/CodeData/code/tsai-main/star-bio/outputs/*
+/star-bio/outputs/
+/star-bio/compare_runs/
+/star-bio/compare_logs/
+/star-bio/debug/
+/star-bio/results.csv

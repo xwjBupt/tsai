@@ -9,13 +9,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
+# Force UTF-8 so Chinese Loguru/tqdm messages are readable in launcher.log.
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+export PYTHONIOENCODING="utf-8"
+export PYTHONUTF8=1
 ENV_PYTHON="${PYTHON:-python}"
 MODE="${MODE:-debug}"
 EPOCHS="${EPOCHS:-300}"
 WORKERS="${WORKERS:-4}"
 BASE_ROOT="${BASE_ROOT:-star-bio/compare_runs}"
-LOG_ROOT="${LOG_ROOT:-star-bio/compare_logs}"
-mkdir -p "$BASE_ROOT" "$LOG_ROOT"
+mkdir -p "$BASE_ROOT"
 
 if [[ "$MODE" == "formal" ]]; then
   git add star-bio
@@ -46,7 +50,8 @@ pids=()
 for spec in "${configs[@]}"; do
   read -r gpu name sampler shift strength patch stride dmodel layers <<< "$spec"
   out="$BASE_ROOT/$name"
-  log="$LOG_ROOT/$name.log"
+  mkdir -p "$out"
+  log="$out/launcher.log"
   echo "launch GPU=$gpu name=$name output=$out"
   "$ENV_PYTHON" star-bio/train_patchtst.py \
     --all-folds --epochs "$EPOCHS" --workers "$WORKERS" \

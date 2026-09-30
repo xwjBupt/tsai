@@ -125,7 +125,7 @@ conda activate nnunet_seg
 bash star-bio/launch_8_compare.sh
 ```
 
-默认八个配置为：联合类别/批次采样基线、关闭批次增强、类别采样、均匀采样、较弱增强、较强增强、patch 长度 16、patch 长度 64。结果分别写入 `star-bio/compare_runs/<name>/`，日志写入 `star-bio/compare_logs/`。
+默认八个配置为：联合类别/批次采样基线、关闭批次增强、类别采样、均匀采样、较弱增强、较强增强、patch 长度 16、patch 长度 64。每个实验的结果和启动日志都写入自己的目录 `star-bio/compare_runs/<name>/`，日志文件为 `launcher.log`；不会再创建独立的 `compare_logs` 目录。
 
 正式并行实验先只提交一次代码，八个进程共享同一个 commit：
 

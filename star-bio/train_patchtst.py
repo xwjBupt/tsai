@@ -39,7 +39,8 @@ def setup_logger():
     logger.remove()
     if main_process():
         logger.add(sys.stderr, level="INFO", colorize=True,
-                   format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}")
+                   format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+                   encoding="utf-8")
     else:
         logger.add(lambda _: None, level="CRITICAL")
     return logger
