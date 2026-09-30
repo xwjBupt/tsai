@@ -1,8 +1,4 @@
-"""PatchTST classifier adapter for the Cell HDF5 cache.
-
-The tsai model is a forecasting backbone. We keep its channel/temporal output,
-pool over the predicted sequence, and attach a classifier for bacteria labels.
-"""
+"""PatchTST classifier adapter for the Cell HDF5 cache."""
 import sys
 from pathlib import Path
 
@@ -28,22 +24,36 @@ class PatchTSTClassifier(nn.Module):
             raise ValueError("d_model 必须能被 n_heads 整除")
         PatchTST = import_patchtst(tsai_root)
         self.n_points = n_points
-        self.backbone = PatchTST(
+        # Reuse tsai's patching and Transformer encoder. The forecasting head
+        # is omitted because pred_dim=1 would compress all patches to scalars.
+        forecast_model = PatchTST(
             c_in=3, c_out=3, seq_len=n_points, pred_dim=1,
             n_layers=n_layers, n_heads=n_heads, d_model=d_model, d_ff=d_ff,
             dropout=dropout, attn_dropout=dropout / 2, patch_len=patch_len,
             stride=stride, revin=revin, decomposition=decomposition,
         )
+        if decomposition:
+            raise ValueError("classification adapter currently requires decomposition=False")
+        core = forecast_model.model
+        self.revin_layer = core.revin_layer
+        self.padding_patch_layer = core.padding_patch_layer
+        self.unfold = core.unfold
+        self.encoder = core.backbone
+        self.patch_len = patch_len
+        self.patch_num = core.patch_num
         self.head = nn.Sequential(
-            nn.LayerNorm(3), nn.Linear(3, 64), nn.GELU(),
-            nn.Dropout(dropout), nn.Linear(64, n_classes)
+            nn.LayerNorm(3 * d_model), nn.Linear(3 * d_model, 256), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(256, n_classes)
         )
 
     def forward(self, x):
         if x.ndim != 3 or tuple(x.shape[1:]) != (3, self.n_points):
             raise ValueError(f"需要 [N, 3, {self.n_points}] 输入，收到 {tuple(x.shape)}")
-        z = self.backbone(x)
-        # pred_dim=1 turns PatchTST's channel-wise forecasting head into a
-        # learned channel representation, avoiding its large seq_len-wide head.
-        z = z.squeeze(-1)
+        z = self.revin_layer(x, torch.tensor(True, dtype=torch.bool, device=x.device))
+        z = self.padding_patch_layer(z)
+        b, c, s = z.size()
+        z = z.reshape(-1, 1, 1, s)
+        z = self.unfold(z)
+        z = z.permute(0, 2, 1).reshape(b, c, -1, self.patch_len).permute(0, 1, 3, 2)
+        z = self.encoder(z).mean(dim=-1).reshape(b, -1)
         return self.head(z)

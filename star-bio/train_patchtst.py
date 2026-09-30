@@ -193,11 +193,22 @@ def lr_at(cfg, epoch):
     p = (epoch - warm - 1) / max(1, cfg.epochs - warm - 1)
     return cfg.lr * (.01 + .99 * (1 + math.cos(math.pi * p)) / 2)
 
-def make_loader(cache, idx, cfg, labels, train, device):
-    ds = SpectraDataset(cache, idx, train)
+def make_loader(cache, idx, cfg, labels, batches, train, device, args):
+    ds = SpectraDataset(cache, idx, train, batch_shift=args.batch_shift,
+                        augmentation_strength=args.augmentation_strength)
     if train:
-        count = np.bincount(labels[idx], minlength=cfg.n_classes)
-        sampler = WeightedRandomSampler(torch.as_tensor((1 / np.maximum(count, 1))[labels[idx]], dtype=torch.double), len(idx), replacement=True)
+        if args.sampler == "joint":
+            # Balance the observed (class, batch) combinations so one batch
+            # cannot dominate the representation during leave-one-batch-out.
+            keys = labels[idx] * cfg.n_batches + batches[idx]
+            counts = np.bincount(keys, minlength=cfg.n_classes * cfg.n_batches)
+            sample_weights = (1 / np.maximum(counts, 1))[keys]
+        elif args.sampler == "class":
+            counts = np.bincount(labels[idx], minlength=cfg.n_classes)
+            sample_weights = (1 / np.maximum(counts, 1))[labels[idx]]
+        else:
+            sample_weights = np.ones(len(idx), dtype=np.float64)
+        sampler = WeightedRandomSampler(torch.as_tensor(sample_weights, dtype=torch.double), len(idx), replacement=True)
     else: sampler = None
     return DataLoader(ds, batch_size=cfg.batch_size, sampler=sampler, shuffle=(sampler is None and train),
                       num_workers=cfg.workers, pin_memory=device.type == "cuda", persistent_workers=cfg.workers > 0)
@@ -310,15 +321,27 @@ def probe_batch(cfg, device, args):
 
 def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     cfg=Config(); cfg.cache_path=str(Path(args.cache).resolve()); cfg.data_root=str(Path(args.data_root or meta["data_root"]).resolve()); cfg.output_root=str(experiment_root)
-    cfg.epochs=args.epochs; cfg.workers=args.workers; cfg.lr=args.lr; cfg.patience=args.patience; cfg.n_points=meta["n_points"]; cfg.n_classes=len(meta["labels"]); cfg.n_batches=len(meta["batch_values"]); cfg.labels=meta["labels"]; cfg.batch_values=meta["batch_values"]
+    cfg.epochs=args.epochs; cfg.workers=args.workers; cfg.lr=args.lr; cfg.patience=args.patience; cfg.sampler=args.sampler; cfg.batch_shift=args.batch_shift; cfg.augmentation_strength=args.augmentation_strength; cfg.n_points=meta["n_points"]; cfg.n_classes=len(meta["labels"]); cfg.n_batches=len(meta["batch_values"]); cfg.labels=meta["labels"]; cfg.batch_values=meta["batch_values"]
     cfg.batch_size=probe_batch(cfg,device,args)
     idx,val_batch=make_splits(meta,test_batch,args.val_batch); seed_all(cfg.seed+test_batch)
     idx={k:limit_per_class(v,meta["y"],args.limit_per_class,cfg.seed+i) for i,(k,v) in enumerate(idx.items())}
     out=Path(cfg.output_root)/f"fold{test_batch}"; out.mkdir(parents=True,exist_ok=True)
     if (out/"best.pt").exists(): raise FileExistsError(f"{out} 已有 best.pt，请换 --output")
     if main_process():
-        cfg.save(out/"config.json"); np.savez_compressed(out/"splits.npz",**idx); save_json(out/"split.json",{"test_batch":test_batch,"val_batch":val_batch,"counts":{k:len(v) for k,v in idx.items()},"cache_fingerprint":meta["fingerprint"],"batch_size_per_gpu":cfg.batch_size,"world_size":world()})
-    loaders={k:make_loader(cfg.cache_path,v,cfg,meta["y"],k=="train",device) for k,v in idx.items()}
+        config_payload = {**asdict(cfg), "patch_len": args.patch_len, "stride": args.stride,
+                          "layers": args.layers, "heads": args.heads, "d_model": args.d_model,
+                          "d_ff": args.d_ff, "dropout": args.dropout, "tsai_root": args.tsai_root,
+                          "sampler": args.sampler, "batch_shift": args.batch_shift,
+                          "augmentation_strength": args.augmentation_strength}
+        save_json(out / "config.json", config_payload)
+        np.savez_compressed(out/"splits.npz", **idx)
+        save_json(out/"split.json", {"test_batch": test_batch, "val_batch": val_batch,
+                                     "counts": {k: len(v) for k, v in idx.items()},
+                                     "cache_fingerprint": meta["fingerprint"],
+                                     "batch_size_per_gpu": cfg.batch_size, "world_size": world(),
+                                     "sampler": args.sampler, "batch_shift": args.batch_shift})
+    loaders={k:make_loader(cfg.cache_path, v, cfg, meta["y"], meta["batch"],
+                           k == "train", device, args) for k, v in idx.items()}
     model=PatchTSTClassifier(cfg.n_classes,cfg.n_points,args.tsai_root,patch_len=args.patch_len,stride=args.stride,n_layers=args.layers,n_heads=args.heads,d_model=args.d_model,d_ff=args.d_ff,dropout=args.dropout).to(device)
     writer = None
     if args.tensorboard:
@@ -348,15 +371,13 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             history.append(val)
             logger.info("fold={} epoch={}/{} train_loss={:.5f} val_loss={:.5f} acc={:.4f} bacc={:.4f} macro_f1={:.4f} lr={:.3e}",
                         test_batch, epoch, cfg.epochs, train_loss, val["val_loss"], val["acc"], val["bacc"], val["macro_f1"], current_lr)
-            state=model.module.state_dict() if is_dist() else model.state_dict(); ck={"schema_version":SCHEMA_VERSION,"model":state,"config":{**asdict(cfg),"patch_len":args.patch_len,"stride":args.stride,"layers":args.layers,"heads":args.heads,"d_model":args.d_model,"d_ff":args.d_ff,"dropout":args.dropout,"tsai_root":args.tsai_root},"labels":cfg.labels,"batch_values":cfg.batch_values,"wave":meta["wave"].tolist(),"preprocess":meta["preprocess"],"cache_fingerprint":meta["fingerprint"],"test_batch":test_batch,"val_batch":val_batch,"test_indices":idx["test"].tolist(),"limit_per_class":args.limit_per_class}
+            state=model.state_dict(); ck={"schema_version":SCHEMA_VERSION,"model":state,"config":{**asdict(cfg),"patch_len":args.patch_len,"stride":args.stride,"layers":args.layers,"heads":args.heads,"d_model":args.d_model,"d_ff":args.d_ff,"dropout":args.dropout,"tsai_root":args.tsai_root,"sampler":args.sampler,"batch_shift":args.batch_shift,"augmentation_strength":args.augmentation_strength},"labels":cfg.labels,"batch_values":cfg.batch_values,"wave":meta["wave"].tolist(),"preprocess":meta["preprocess"],"cache_fingerprint":meta["fingerprint"],"test_batch":test_batch,"val_batch":val_batch,"test_indices":idx["test"].tolist(),"limit_per_class":args.limit_per_class}
             if val["macro_f1"]>best: best=val["macro_f1"]; stale=0; torch.save(ck,out/"best.pt")
             else: stale+=1
             save_json(out/"history.json",history)
             save_history_artifacts(history, out, cfg.labels)
-        # Rank 0 decides early stopping; every process must receive the same
-        # decision before entering the next epoch/barrier.
-        stop = torch.tensor([int(main_process() and stale >= cfg.patience)], device=device)
-        if bool(stop.item()): break
+        if stale >= cfg.patience:
+            break
         if writer:
             writer.add_scalar("loss/train", train_loss, epoch); writer.add_scalar("loss/validation", val["val_loss"], epoch)
             writer.add_scalar("metrics/accuracy", val["acc"], epoch); writer.add_scalar("metrics/balanced_accuracy", val["bacc"], epoch); writer.add_scalar("metrics/macro_f1", val["macro_f1"], epoch)
@@ -374,7 +395,7 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     return result
 
 def main():
-    p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(); g.add_argument("--fold",type=int); g.add_argument("--all-folds",action="store_true"); p.add_argument("--val-batch",type=int); p.add_argument("--data-root",default=Config().data_root); p.add_argument("--cache",default=Config().cache_path); p.add_argument("--output-root",help="实验父目录，实验名会自动追加时间戳"); p.add_argument("--epochs",type=int,default=300); p.add_argument("--batch-size",type=int); p.add_argument("--workers",type=int,default=4); p.add_argument("--lr",type=float,default=2e-4); p.add_argument("--patience",type=int,default=40); p.add_argument("--tsai-root",default="/home/wjx/CodeData/code/tsai-main"); p.add_argument("--patch-len",type=int,default=32); p.add_argument("--stride",type=int,default=16); p.add_argument("--layers",type=int,default=3); p.add_argument("--heads",type=int,default=8); p.add_argument("--d-model",type=int,default=128); p.add_argument("--d-ff",type=int,default=256); p.add_argument("--dropout",type=float,default=.1); p.add_argument("--limit-per-class",type=int); p.add_argument("--auto-batch-start",type=int,default=8); p.add_argument("--auto-batch-max",type=int,default=4096); p.add_argument("--memory-target",type=float,default=.92); p.add_argument("--gpu-id",type=int); p.add_argument("--tensorboard",action=argparse.BooleanOptionalAction,default=True); p.add_argument("--debug",action=argparse.BooleanOptionalAction,default=False,help="debug 模式写入 debug/，不执行 git commit"); p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
+    p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(); g.add_argument("--fold",type=int); g.add_argument("--all-folds",action="store_true"); p.add_argument("--val-batch",type=int); p.add_argument("--data-root",default=Config().data_root); p.add_argument("--cache",default=Config().cache_path); p.add_argument("--output-root",help="实验父目录，实验名会自动追加时间戳"); p.add_argument("--epochs",type=int,default=300); p.add_argument("--batch-size",type=int); p.add_argument("--workers",type=int,default=4); p.add_argument("--lr",type=float,default=2e-4); p.add_argument("--patience",type=int,default=40); p.add_argument("--tsai-root",default="/home/wjx/CodeData/code/tsai-main"); p.add_argument("--patch-len",type=int,default=32); p.add_argument("--stride",type=int,default=16); p.add_argument("--layers",type=int,default=3); p.add_argument("--heads",type=int,default=8); p.add_argument("--d-model",type=int,default=128); p.add_argument("--d-ff",type=int,default=256); p.add_argument("--dropout",type=float,default=.1); p.add_argument("--limit-per-class",type=int); p.add_argument("--sampler",choices=["joint","class","uniform"],default="joint",help="训练采样：联合类别-批次、仅类别或均匀"); p.add_argument("--batch-shift",action=argparse.BooleanOptionalAction,default=True,help="启用批次增益/基线漂移增强"); p.add_argument("--augmentation-strength",type=float,default=1.0); p.add_argument("--auto-batch-start",type=int,default=8); p.add_argument("--auto-batch-max",type=int,default=4096); p.add_argument("--memory-target",type=float,default=.92); p.add_argument("--gpu-id",type=int); p.add_argument("--tensorboard",action=argparse.BooleanOptionalAction,default=True); p.add_argument("--debug",action=argparse.BooleanOptionalAction,default=False,help="debug 模式写入 debug/，不执行 git commit"); p.add_argument("--device",choices=["auto","cpu","cuda"],default="auto")
     a=p.parse_args(); os.environ["PATCHTST_DEVICE"]=a.device; device=select_gpu(a); setup_logger(); experiment_root, experiment_meta=prepare_experiment(a); logger.info("实验={} debug={} commit={} device={} epochs={} data={}", experiment_meta["experiment_id"], experiment_meta["debug"], experiment_meta["commit"] or "none", device, a.epochs, a.data_root); meta=load_meta(a.cache,check_sources=True,data_root=a.data_root); folds=meta["batch_values"] if a.all_folds else [a.fold or meta["batch_values"][0]]
     for fold in folds: make_splits(meta,fold,a.val_batch)
     fold_results = {fold: run(a, fold, meta, device, experiment_root, experiment_meta) for fold in folds}

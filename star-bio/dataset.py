@@ -8,10 +8,12 @@ from torch.utils.data import Dataset
 
 
 class SpectraDataset(Dataset):
-    def __init__(self, cache, indices, train=False):
+    def __init__(self, cache, indices, train=False, batch_shift=False, augmentation_strength=1.0):
         self.cache = str(cache)
         self.indices = np.asarray(indices, dtype=np.int64)
         self.train = train
+        self.batch_shift = batch_shift
+        self.augmentation_strength = float(augmentation_strength)
         self.h = None
         self.pid = None
 
@@ -52,4 +54,14 @@ class SpectraDataset(Dataset):
                 width = int(torch.randint(8, min(64, x.shape[-1]) + 1, (1,)))
                 start = int(torch.randint(0, x.shape[-1] - width + 1, (1,)))
                 x[:, start:start + width] = 0
+            if self.batch_shift and torch.rand(()) < 0.7:
+                # Simulate batch-to-batch gain and baseline drift while
+                # keeping the derivative/SNV channels consistent.
+                t = torch.linspace(-1, 1, x.shape[-1], dtype=x.dtype)
+                gain = torch.empty(1).uniform_(0.94, 1.06) ** self.augmentation_strength
+                offset = torch.empty(1).uniform_(-0.04, 0.04) * self.augmentation_strength
+                slope = torch.empty(1).uniform_(-0.025, 0.025) * self.augmentation_strength
+                x[0] = x[0] * gain + offset + slope * t
+                x[1] = x[1] * gain + slope
+                x[2] = (x[0] - x[0].mean()) / (x[0].std() + 1e-6)
         return x, torch.tensor(y), torch.tensor(batch)
