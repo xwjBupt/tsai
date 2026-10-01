@@ -36,19 +36,19 @@ fi
 # Each row: GPU, name, sampler, batch-shift option, augmentation strength,
 # patch length, stride, transformer width, layers.
 configs=(
-  "0 baseline_joint  joint  --batch-shift       1.0 32 16 128 3"
-  "1 no_shift        joint  --no-batch-shift    0.0 32 16 128 3"
-  "2 class_sampler   class  --batch-shift       1.0 32 16 128 3"
-  "3 uniform_sampler uniform --batch-shift      1.0 32 16 128 3"
-  "4 aug_half        joint  --batch-shift       0.5 32 16 128 3"
-  "5 aug_strong      joint  --batch-shift       1.5 32 16 128 3"
-  "6 patch16         joint  --batch-shift       1.0 16 8  128 3"
-  "7 patch64         joint  --batch-shift       1.0 64 32 128 3"
+  "0 patch64_joint       joint   --batch-shift       1.0 64 32 128 3 256"
+  "1 patch64_no_shift    joint   --no-batch-shift    0.0 64 32 128 3 256"
+  "2 patch64_aug025      joint   --batch-shift       0.25 64 32 128 3 256"
+  "3 patch64_aug050      joint   --batch-shift       0.5 64 32 128 3 256"
+  "4 patch64_class       class   --batch-shift       1.0 64 32 128 3 256"
+  "5 patch64_uniform     uniform --batch-shift       1.0 64 32 128 3 256"
+  "6 patch64_d256        joint   --batch-shift       0.5 64 32 256 3 512"
+  "7 patch48_joint       joint   --batch-shift       0.5 48 24 128 3 256"
 )
 
 pids=()
 for spec in "${configs[@]}"; do
-  read -r gpu name sampler shift strength patch stride dmodel layers <<< "$spec"
+  read -r gpu name sampler shift strength patch stride dmodel layers dff <<< "$spec"
   out="$BASE_ROOT/$name"
   mkdir -p "$out"
   log="$out/launcher.log"
@@ -59,7 +59,7 @@ for spec in "${configs[@]}"; do
     --sampler "$sampler" $shift \
     --augmentation-strength "$strength" \
     --patch-len "$patch" --stride "$stride" \
-    --d-model "$dmodel" --layers "$layers" --d-ff 256 \
+    --d-model "$dmodel" --layers "$layers" --d-ff "$dff" \
     "${MODE_ARGS[@]}" --output-root "$out" \
     > "$log" 2>&1 &
   pids+=("$!")

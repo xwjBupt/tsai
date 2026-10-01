@@ -19,7 +19,7 @@ cd /home/wjx/CodeData/code/tsai-main
 
 ## 实验模式、时间戳和 Git 记录
 
-每次运行都会创建唯一实验目录，目录名以 `YY-MM-DD@HH-MM-SS` 开头：
+每次运行都会创建唯一实验目录，目录名以 `YY-MM-DD@HH-MM-SS` 开头。`results.csv` 中的 `experiment_id` 使用 `--output-root` 的一级目录名，`timestamp` 和 `commit` 单独记录本次运行：例如 `compare_runs/aug_strong/26-09-30@14-39-46+commit-7b0dbaa/` 会记录为 `experiment_id=aug_strong`、`timestamp=26-09-30@14-39-46`、`commit=7b0dbaa`。
 
 ```text
 debug/YY-MM-DD@HH-MM-SS+debug/       # 调试实验，不 git commit
@@ -125,7 +125,7 @@ conda activate nnunet_seg
 bash star-bio/launch_8_compare.sh
 ```
 
-默认八个配置为：联合类别/批次采样基线、关闭批次增强、类别采样、均匀采样、较弱增强、较强增强、patch 长度 16、patch 长度 64。每个实验的结果和启动日志都写入自己的目录 `star-bio/compare_runs/<name>/`，日志文件为 `launcher.log`；不会再创建独立的 `compare_logs` 目录。
+默认八个配置为：Patch64 联合采样基线、Patch64 无增强、Patch64 增强 0.25、Patch64 增强 0.5、Patch64 类别采样、Patch64 均匀采样、Patch64 大模型、Patch48。每个实验的结果和启动日志都写入自己的目录 `star-bio/compare_runs/<name>/`，日志文件为 `launcher.log`；不会再创建独立的 `compare_logs` 目录。
 
 正式并行实验先只提交一次代码，八个进程共享同一个 commit：
 
@@ -133,7 +133,7 @@ bash star-bio/launch_8_compare.sh
 MODE=formal EPOCHS=300 bash star-bio/launch_8_compare.sh
 ```
 
-正式实验会为每个配置创建带时间戳和共享 commit 的目录，并在每个四 fold 实验结束后追加汇总到 `star-bio/results.csv`。如果只想改变配置，可编辑启动脚本中的 `configs` 数组；每一行依次是 GPU、实验名、采样策略、批次增强、增强强度、patch 长度、stride、模型维度和层数。
+正式实验会为每个配置创建带时间戳和共享 commit 的目录，并在每个四 fold 实验结束后追加汇总到 `star-bio/results.csv`。如果只想改变配置，可编辑启动脚本中的 `configs` 数组；每一行依次是 GPU、实验名、采样策略、批次增强、增强强度、patch 长度、stride、模型维度、层数和 FFN 维度。
 
 ## 评估和推理
 

@@ -111,8 +111,12 @@ def prepare_experiment(args):
     if experiment_root.exists():
         raise FileExistsError(f"实验目录已存在: {experiment_root}，请稍后重试或指定其他 --output-root")
     experiment_root.mkdir(parents=True, exist_ok=False)
+    # For compare_runs/<name>/<timestamp>, the stable experiment identity is
+    # the first-level name (<name>); timestamp and commit distinguish runs.
+    experiment_name = base.name if args.output_root else root_name
     metadata = {
-        "experiment_id": experiment_id,
+        "experiment_id": experiment_name,
+        "experiment_dir": experiment_id,
         "timestamp": stamp,
         "debug": bool(args.debug),
         "commit": commit,
@@ -174,7 +178,8 @@ def append_results_csv(results, labels, experiment_meta, output_path=None):
             with result_path.open(newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 previous_fields = reader.fieldnames or []
-                previous_rows = [row for row in reader if row.get("experiment_id") != experiment_meta["experiment_id"]]
+                current_key = (experiment_meta["experiment_id"], experiment_meta["timestamp"], experiment_meta["commit"] or "")
+                previous_rows = [row for row in reader if (row.get("experiment_id", ""), row.get("timestamp", ""), row.get("commit", "")) != current_key]
         merged_fields = list(dict.fromkeys([*previous_fields, *fieldnames]))
         with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8",
                                          dir=result_path.parent,
