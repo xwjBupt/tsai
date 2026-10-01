@@ -36,14 +36,14 @@ fi
 # Each row: GPU, name, sampler, batch-shift option, augmentation strength,
 # patch length, stride, transformer width, layers.
 configs=(
-  "0 patch64_joint       joint   --batch-shift       1.0 64 32 128 3 256"
-  "1 patch64_no_shift    joint   --no-batch-shift    0.0 64 32 128 3 256"
-  "2 patch64_aug025      joint   --batch-shift       0.25 64 32 128 3 256"
-  "3 patch64_aug050      joint   --batch-shift       0.5 64 32 128 3 256"
-  "4 patch64_class       class   --batch-shift       1.0 64 32 128 3 256"
-  "5 patch64_uniform     uniform --batch-shift       1.0 64 32 128 3 256"
-  "6 patch64_d256        joint   --batch-shift       0.5 64 32 256 3 512"
-  "7 patch48_joint       joint   --batch-shift       0.5 48 24 128 3 256"
+  "0 patch64_joint       joint   --batch-shift       1.0 64 32 256 3 512"
+  "1 patch64_no_shift    joint   --no-batch-shift    0.0 64 32 256 3 512"
+  "2 patch64_aug025      joint   --batch-shift       0.25 64 32 256 3 512"
+  "3 patch64_aug050      joint   --batch-shift       0.5 64 32 256 3 512"
+  "4 patch64_class       class   --batch-shift       1.0 64 32 256 3 512"
+  "5 patch64_uniform     uniform --batch-shift       1.0 64 32 256 3 512"
+  "6 patch64_d384        joint   --batch-shift       0.5 64 32 384 4 768"
+  "7 patch48_joint       joint   --batch-shift       0.5 48 24 256 3 512"
 )
 
 pids=()

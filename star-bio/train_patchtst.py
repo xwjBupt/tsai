@@ -802,8 +802,8 @@ def main():
     p.add_argument("--stride", type=int, default=16)
     p.add_argument("--layers", type=int, default=3)
     p.add_argument("--heads", type=int, default=8)
-    p.add_argument("--d-model", type=int, default=128)
-    p.add_argument("--d-ff", type=int, default=256)
+    p.add_argument("--d-model", type=int, default=256)
+    p.add_argument("--d-ff", type=int, default=512)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--limit-per-class", type=int)
     p.add_argument(
@@ -819,9 +819,9 @@ def main():
         help="启用批次增益/基线漂移增强",
     )
     p.add_argument("--augmentation-strength", type=float, default=1.0)
-    p.add_argument("--auto-batch-start", type=int, default=8)
-    p.add_argument("--auto-batch-max", type=int, default=4096)
-    p.add_argument("--memory-target", type=float, default=0.92)
+    p.add_argument("--auto-batch-start", type=int, default=32)
+    p.add_argument("--auto-batch-max", type=int, default=8192)
+    p.add_argument("--memory-target", type=float, default=0.96)
     p.add_argument("--gpu-id", type=int)
     p.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument(
