@@ -20,7 +20,7 @@ def evaluate(model, loader, device, labels):
     model.eval()
     ys, ps = [], []
     for x, y, _ in loader:
-        pred = model(x.to(device))["logits"].argmax(1).cpu().numpy()
+        pred = model(x.to(device)).argmax(1).cpu().numpy()
         ys.extend(y.tolist())
         ps.extend(pred.tolist())
     return classification_metrics(ys, ps, labels)

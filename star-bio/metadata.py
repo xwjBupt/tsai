@@ -39,7 +39,10 @@ def model_from_config(config):
                               patch_len=config.get("patch_len", 32), stride=config.get("stride", 16),
                               n_layers=config.get("layers", 3), n_heads=config.get("heads", 8),
                               d_model=config.get("d_model", 128), d_ff=config.get("d_ff", 256),
-                              dropout=config.get("dropout", .1))
+                              dropout=config.get("dropout", .1),
+                              revin=config.get("revin", True),
+                              pooling=config.get("pooling", "mean"),
+                              pool_segments=config.get("pool_segments", 4))
 
 
 def load_checkpoint(path):

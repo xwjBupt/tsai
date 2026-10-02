@@ -12,6 +12,7 @@ import sys
 import csv
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 
 import numpy as np
@@ -384,7 +385,8 @@ def save_history_artifacts(history, output, labels):
         "bacc",
         "macro_f1",
         "macro_precision",
-        "macro_recall",
+        "macro_recall", "optimizer_steps", "epoch_optimizer_steps", "batches_seen",
+        "train_seconds", "total_train_seconds", "epoch_seconds", "elapsed_seconds",
     ]
     for label in labels:
         fields.extend([f"{label}_precision", f"{label}_recall", f"{label}_f1"])
@@ -499,6 +501,9 @@ def probe_batch(cfg, device, args):
         d_model=args.d_model,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        revin=args.revin,
+        pooling=args.pooling,
+        pool_segments=args.pool_segments,
     ).to(device)
     model.train()
     good = max(1, candidate // 2)
@@ -559,6 +564,7 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     cfg.data_root = str(Path(args.data_root or meta["data_root"]).resolve())
     cfg.output_root = str(experiment_root)
     cfg.epochs = args.epochs
+    cfg.seed = args.seed
     cfg.workers = args.workers
     cfg.lr = args.lr
     cfg.patience = args.patience
@@ -592,6 +598,10 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             "d_ff": args.d_ff,
             "dropout": args.dropout,
             "tsai_root": args.tsai_root,
+            "revin": args.revin,
+            "pooling": args.pooling,
+            "pool_segments": args.pool_segments,
+            "augmentation_version": "drift-recompute-v2",
             "sampler": args.sampler,
             "batch_shift": args.batch_shift,
             "augmentation_strength": args.augmentation_strength,
@@ -628,6 +638,9 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
         d_model=args.d_model,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        revin=args.revin,
+        pooling=args.pooling,
+        pool_segments=args.pool_segments,
     ).to(device)
     writer = None
     if args.tensorboard:
@@ -651,7 +664,17 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     best = -1
     stale = 0
     history = []
+    optimizer_steps = 0
+    batches_seen = 0
+    training_seconds = 0.0
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    fold_started = time.perf_counter()
     for epoch in range(1, cfg.epochs + 1):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_started = time.perf_counter()
+        steps_before = optimizer_steps
         model.train()
         total = 0.0
         seen = 0
@@ -672,12 +695,23 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scale_before = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
+            # GradScaler skips the optimizer step on nonfinite gradients.
+            optimizer_steps += int(scaler.get_scale() >= scale_before)
+            batches_seen += 1
             total += float(loss) * len(y)
             seen += len(y)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_train_seconds = time.perf_counter() - epoch_started
+        training_seconds += epoch_train_seconds
         train_loss = reduce_train_loss(total, seen, device)
         val = gather_eval(model, loaders["val"], device, cfg.labels)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        epoch_seconds = time.perf_counter() - epoch_started
         if main_process():
             current_lr = lr_at(cfg, epoch)
             val.update(
@@ -687,10 +721,17 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 val_loss=val["val_loss"],
                 lr=current_lr,
                 learning_rate=current_lr,
+                optimizer_steps=optimizer_steps,
+                epoch_optimizer_steps=optimizer_steps - steps_before,
+                batches_seen=batches_seen,
+                train_seconds=epoch_train_seconds,
+                total_train_seconds=training_seconds,
+                epoch_seconds=epoch_seconds,
+                elapsed_seconds=time.perf_counter() - fold_started,
             )
             history.append(val)
             logger.info(
-                "fold={} epoch={}/{} train_loss={:.5f} val_loss={:.5f} acc={:.4f} bacc={:.4f} macro_f1={:.4f} lr={:.3e}",
+                "fold={} epoch={}/{} train_loss={:.5f} val_loss={:.5f} acc={:.4f} bacc={:.4f} macro_f1={:.4f} lr={:.3e} updates={} train_s={:.1f}",
                 test_batch,
                 epoch,
                 cfg.epochs,
@@ -700,25 +741,16 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 val["bacc"],
                 val["macro_f1"],
                 current_lr,
+                optimizer_steps,
+                epoch_train_seconds,
             )
             state = model.state_dict()
             ck = {
                 "schema_version": SCHEMA_VERSION,
                 "model": state,
-                "config": {
-                    **asdict(cfg),
-                    "patch_len": args.patch_len,
-                    "stride": args.stride,
-                    "layers": args.layers,
-                    "heads": args.heads,
-                    "d_model": args.d_model,
-                    "d_ff": args.d_ff,
-                    "dropout": args.dropout,
-                    "tsai_root": args.tsai_root,
-                    "sampler": args.sampler,
-                    "batch_shift": args.batch_shift,
-                    "augmentation_strength": args.augmentation_strength,
-                },
+                "config": config_payload,
+                "epoch": epoch,
+                "optimizer_steps": optimizer_steps,
                 "labels": cfg.labels,
                 "batch_values": cfg.batch_values,
                 "wave": meta["wave"].tolist(),
@@ -737,8 +769,6 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 stale += 1
             save_json(out / "history.json", history)
             save_history_artifacts(history, out, cfg.labels)
-        if stale >= cfg.patience:
-            break
         if writer:
             writer.add_scalar("loss/train", train_loss, epoch)
             writer.add_scalar("loss/validation", val["val_loss"], epoch)
@@ -764,13 +794,23 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 writer.add_scalar(
                     f"class/{label}/f1", val["report"][label]["f1-score"], epoch
                 )
+            for key in ("optimizer_steps", "epoch_optimizer_steps", "batches_seen"):
+                writer.add_scalar(f"optimization/{key}", val[key], epoch)
+            for key in ("train_seconds", "total_train_seconds", "epoch_seconds", "elapsed_seconds"):
+                writer.add_scalar(f"timing/{key}", val[key], epoch)
             writer.flush()
+        if stale >= cfg.patience:
+            break
     ck = torch.load(out / "best.pt", map_location=device, weights_only=True)
     model.load_state_dict(ck["model"])
     result = gather_eval(model, loaders["test"], device, cfg.labels)
     if main_process():
         result["test_loss"] = result.pop("val_loss")
-        result.update(test_batch=test_batch, val_batch=val_batch, best_val_f1=best)
+        result.update(test_batch=test_batch, val_batch=val_batch, best_val_f1=best,
+                      best_epoch=ck["epoch"], best_optimizer_steps=ck["optimizer_steps"],
+                      optimizer_steps=optimizer_steps, batches_seen=batches_seen,
+                      total_train_seconds=training_seconds,
+                      elapsed_seconds=time.perf_counter() - fold_started)
         save_json(out / "test_metrics.json", result)
         print(
             json.dumps(
@@ -804,6 +844,10 @@ def main():
     p.add_argument("--heads", type=int, default=8)
     p.add_argument("--d-model", type=int, default=256)
     p.add_argument("--d-ff", type=int, default=512)
+    p.add_argument("--revin", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--pooling", choices=["mean", "segments", "attention"], default="mean")
+    p.add_argument("--pool-segments", type=int, default=4)
+    p.add_argument("--seed", type=int, default=3407)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--limit-per-class", type=int)
     p.add_argument(
@@ -833,6 +877,12 @@ def main():
     p.add_argument("--commit-id", help="复用已提交的 commit，适合并行正式实验")
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     a = p.parse_args()
+    if a.epochs < 1 or (a.batch_size is not None and a.batch_size < 1):
+        p.error("epochs 和 batch-size 必须为正数")
+    if not math.isfinite(a.augmentation_strength) or a.augmentation_strength < 0:
+        p.error("augmentation-strength 必须为非负有限数值")
+    if a.pool_segments < 1 or a.heads < 1 or a.d_model < 1 or a.d_model % a.heads:
+        p.error("pool-segments/heads/d-model 无效")
     os.environ["PATCHTST_DEVICE"] = a.device
     device = select_gpu(a)
     setup_logger()

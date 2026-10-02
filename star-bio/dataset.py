@@ -1,10 +1,27 @@
 """Lazy, process-local HDF5 access for DataLoader workers."""
 import os
+import math
 
 import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from scipy.signal import savgol_filter
+from prepare_data import PREPROCESS
+
+
+def apply_spectral_drift(x, gain, offset, slope):
+    """Drift the first channel, then rebuild channels using cache conventions.
+
+    Derivative delta=1 means per spectral sample, not per normalized t unit.
+    SNV uses population standard deviation, matching prepare_data.process.
+    """
+    t = torch.linspace(-1, 1, x.shape[-1], dtype=x.dtype, device=x.device)
+    norm = x[0] * gain + offset + slope * t
+    deriv = savgol_filter(norm.numpy(), PREPROCESS["derivative_window"],
+                          PREPROCESS["derivative_order"], deriv=1, delta=1, mode="interp")
+    snv = (norm - norm.mean()) / (norm.std(unbiased=False) + 1e-6)
+    return torch.stack([norm, torch.from_numpy(deriv).to(norm), snv])
 
 
 class SpectraDataset(Dataset):
@@ -14,6 +31,8 @@ class SpectraDataset(Dataset):
         self.train = train
         self.batch_shift = batch_shift
         self.augmentation_strength = float(augmentation_strength)
+        if not math.isfinite(self.augmentation_strength) or self.augmentation_strength < 0:
+            raise ValueError("augmentation_strength 必须是非负有限数值")
         self.h = None
         self.pid = None
 
@@ -54,14 +73,11 @@ class SpectraDataset(Dataset):
                 width = int(torch.randint(8, min(64, x.shape[-1]) + 1, (1,)))
                 start = int(torch.randint(0, x.shape[-1] - width + 1, (1,)))
                 x[:, start:start + width] = 0
-            if self.batch_shift and torch.rand(()) < 0.7:
+            if self.batch_shift and self.augmentation_strength > 0 and torch.rand(()) < 0.7:
                 # Simulate batch-to-batch gain and baseline drift while
                 # keeping the derivative/SNV channels consistent.
-                t = torch.linspace(-1, 1, x.shape[-1], dtype=x.dtype)
                 gain = torch.empty(1).uniform_(0.94, 1.06) ** self.augmentation_strength
                 offset = torch.empty(1).uniform_(-0.04, 0.04) * self.augmentation_strength
                 slope = torch.empty(1).uniform_(-0.025, 0.025) * self.augmentation_strength
-                x[0] = x[0] * gain + offset + slope * t
-                x[1] = x[1] * gain + slope
-                x[2] = (x[0] - x[0].mean()) / (x[0].std() + 1e-6)
+                x = apply_spectral_drift(x, gain, offset, slope)
         return x, torch.tensor(y), torch.tensor(batch)

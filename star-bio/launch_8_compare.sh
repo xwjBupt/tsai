@@ -19,9 +19,18 @@ MODE="${MODE:-debug}"
 EPOCHS="${EPOCHS:-300}"
 WORKERS="${WORKERS:-4}"
 BASE_ROOT="${BASE_ROOT:-star-bio/compare_runs}"
-mkdir -p "$BASE_ROOT"
+DRY_RUN="${DRY_RUN:-0}"
+SEED="${SEED:-3407}"
+LR="${LR:-0.0002}"
+if [[ "$MODE" != "debug" && "$MODE" != "formal" ]]; then
+  echo "MODE 必须是 debug 或 formal" >&2
+  exit 2
+fi
+if [[ "$DRY_RUN" != "1" ]]; then mkdir -p "$BASE_ROOT"; fi
 
-if [[ "$MODE" == "formal" ]]; then
+if [[ "$MODE" == "formal" && "$DRY_RUN" == "1" ]]; then
+  MODE_ARGS=(--commit-id DRY_RUN)
+elif [[ "$MODE" == "formal" ]]; then
   git add star-bio
   git commit --allow-empty -m "star-bio eight experiment comparison $(date +%y-%m-%d@%H-%M-%S)"
   SHARED_COMMIT="$(git rev-parse --short HEAD)"
@@ -33,35 +42,39 @@ else
   exit 2
 fi
 
-# Each row: GPU, name, sampler, batch-shift option, augmentation strength,
-# patch length, stride, transformer width, layers.
+# GPU, experiment name, fixed batch size, RevIN flag, pooling, drift flag, strength.
+# GPUs 0..3 differ only in batch size. GPUs 4..7 compare to GPU 2.
 configs=(
-  "0 patch64_joint       joint   --batch-shift       1.0 64 32 256 3 512"
-  "1 patch64_no_shift    joint   --no-batch-shift    0.0 64 32 256 3 512"
-  "2 patch64_aug025      joint   --batch-shift       0.25 64 32 256 3 512"
-  "3 patch64_aug050      joint   --batch-shift       0.5 64 32 256 3 512"
-  "4 patch64_class       class   --batch-shift       1.0 64 32 256 3 512"
-  "5 patch64_uniform     uniform --batch-shift       1.0 64 32 256 3 512"
-  "6 patch64_d384        joint   --batch-shift       0.5 64 32 384 4 768"
-  "7 patch48_joint       joint   --batch-shift       0.5 48 24 256 3 512"
+  "0 p64_bs4096       4096 --revin    mean      --no-batch-shift 0"
+  "1 p64_bs1024       1024 --revin    mean      --no-batch-shift 0"
+  "2 p64_bs256         256 --revin    mean      --no-batch-shift 0"
+  "3 p64_bs64           64 --revin    mean      --no-batch-shift 0"
+  "4 p64_bs256_norevin 256 --no-revin mean      --no-batch-shift 0"
+  "5 p64_bs256_seg4    256 --revin    segments  --no-batch-shift 0"
+  "6 p64_bs256_attn    256 --revin    attention --no-batch-shift 0"
+  "7 p64_bs256_drift   256 --revin    mean      --batch-shift    0.25"
 )
 
 pids=()
 for spec in "${configs[@]}"; do
-  read -r gpu name sampler shift strength patch stride dmodel layers dff <<< "$spec"
+  read -r gpu name batch revin pooling shift strength <<< "$spec"
   out="$BASE_ROOT/$name"
-  mkdir -p "$out"
   log="$out/launcher.log"
+  command=("$ENV_PYTHON" -u star-bio/train_patchtst.py
+    --all-folds --epochs "$EPOCHS" --workers "$WORKERS"
+    --gpu-id "$gpu" --device cuda --batch-size "$batch" --seed "$SEED" --lr "$LR"
+    --sampler joint "$shift" --augmentation-strength "$strength"
+    --patch-len 64 --stride 32 --d-model 128 --layers 3 --d-ff 256 --heads 8
+    "$revin" --pooling "$pooling" --pool-segments 4
+    "${MODE_ARGS[@]}" --output-root "$out")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%q ' "${command[@]}"
+    printf '\n'
+    continue
+  fi
+  mkdir -p "$out"
   echo "launch GPU=$gpu name=$name output=$out"
-  "$ENV_PYTHON" star-bio/train_patchtst.py \
-    --all-folds --epochs "$EPOCHS" --workers "$WORKERS" \
-    --gpu-id "$gpu" --device cuda \
-    --sampler "$sampler" $shift \
-    --augmentation-strength "$strength" \
-    --patch-len "$patch" --stride "$stride" \
-    --d-model "$dmodel" --layers "$layers" --d-ff "$dff" \
-    "${MODE_ARGS[@]}" --output-root "$out" \
-    > "$log" 2>&1 &
+  "${command[@]}" > "$log" 2>&1 &
   pids+=("$!")
 done
 
