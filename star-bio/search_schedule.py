@@ -36,13 +36,13 @@ def main():
         for busy,negative_free,gpu,free,util in cards():
             if not pending:break
             if gpu in occupied or free<12000:continue
-            spec=pending.pop(0).copy();stamp=datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%y-%m-%d@%H-%M-%S')
+            spec=pending.pop(0).copy();commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT.parent,text=True).strip();stamp=datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%y-%m-%d@%H-%M-%S')
             spec.update(timestamp=stamp,commit=commit[:7])
             folder=out/spec['name']/f'{stamp}+commit-{commit[:7]}';folder.mkdir(parents=True)
             save(folder/'spec.json',spec)
             env={**os.environ,'CUDA_VISIBLE_DEVICES':str(gpu),'PYTHONIOENCODING':'utf-8','OMP_NUM_THREADS':'2','MKL_NUM_THREADS':'2'}
             log=(folder/'launcher.log').open('w',encoding='utf-8')
-            proc=subprocess.Popen([sys.executable,'-u',str(ROOT/'search_train.py'),'--spec',str(folder/'spec.json'),'--out',str(folder)],cwd=ROOT.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
+            proc=subprocess.Popen([sys.executable,'-u',str(ROOT/('search_linear.py' if spec.get('runner')=='linear' else 'search_train.py')),'--spec',str(folder/'spec.json'),'--out',str(folder)],cwd=ROOT.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
             active[proc.pid]={'process':proc,'log':log,'name':spec['name'],'gpu':gpu,'out':str(folder)};launched.add(spec['name'])
             print(f'LAUNCH gpu={gpu} free_mib={free} pid={proc.pid} {spec["name"]}',flush=True)
         save(state_path,{'pid':os.getpid(),'active':[{'pid':pid,**{k:v for k,v in j.items() if k not in ['process','log']}} for pid,j in active.items()],'finished':done,'pending':[s['name'] for s in queue if s['name'] not in launched]})
