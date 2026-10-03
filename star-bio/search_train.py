@@ -27,7 +27,16 @@ def evaluate(model,x,y,indices,labels):
 def run(spec,outdir):
     torch.set_num_threads(2);torch.cuda.set_device(0)
     meta=load_meta(spec['cache'],check_sources=True,data_root=spec['data_root'])
-    with h5py.File(spec['cache']) as h: array=h['x'][:]
+    if spec.get('feature_path'):
+        feature_meta=json.loads(Path(spec['feature_path']).with_suffix('.json').read_text())
+        assert feature_meta['fingerprint']==meta['fingerprint']
+        array=np.load(spec['feature_path'])
+        assert array.shape[0]==len(meta['y']) and array.shape[1]==3
+        meta['n_points']=array.shape[-1]
+        meta['wave']=np.asarray(feature_meta['wave'])
+    else:
+        feature_meta=None
+        with h5py.File(spec['cache']) as h: array=h['x'][:]
     x=torch.from_numpy(array).cuda();del array
     y=torch.from_numpy(meta['y']).cuda()
     labels=meta['labels']; results=[]
@@ -70,7 +79,7 @@ def run(spec,outdir):
             print(json.dumps({'fold':fold,'epoch':ep,'train_loss':total/seen,'val_f1':val['macro_f1'],'seconds':record['elapsed_seconds']}),flush=True)
             if val['macro_f1']>best:
                 best=val['macro_f1'];stale=0
-                torch.save({'model':model.state_dict(),'spec':spec,'n_points':meta['n_points'],'labels':labels,'fold':fold,'val_batch':v,'epoch':ep,'best_val_f1':best,'wave':meta['wave'].tolist(),'preprocess':meta['preprocess'],'fingerprint':meta['fingerprint']},folder/'best.pt')
+                torch.save({'model':model.state_dict(),'spec':spec,'n_points':meta['n_points'],'labels':labels,'fold':fold,'val_batch':v,'epoch':ep,'best_val_f1':best,'wave':meta['wave'].tolist(),'preprocess':meta['preprocess'],'fingerprint':meta['fingerprint'],'feature_meta':feature_meta},folder/'best.pt')
             else: stale+=1
             if stale>=spec.get('patience',15):break
         ck=torch.load(folder/'best.pt',map_location='cpu',weights_only=True);model.load_state_dict(ck['model'])
