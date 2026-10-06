@@ -23,8 +23,16 @@ def main():
     for fold in meta['batch_values']:
         start=time.perf_counter();idx,valbatch=make_splits(meta,fold);folder=out/f'fold{fold}';folder.mkdir();torch.manual_seed(spec.get('seed',3407)+fold)
         tr=torch.tensor(idx['train'],device='cuda');va=torch.tensor(idx['val'],device='cuda');te=torch.tensor(idx['test'],device='cuda')
-        tx=x[tr];ty=y[tr];mean=tx.mean(0);std=tx.std(0).clamp_min(1e-5) if spec.get('standardize',False) else torch.ones_like(mean)
-        tx=(tx-mean)/std;vx=(x[va]-mean)/std
+        tx=x[tr];ty=y[tr]
+        if spec.get('batch_center',False):
+            # Center each observed domain using training-only batch means.
+            means={b:tx[torch.tensor(meta['batch'][idx['train']]==b,device='cuda')].mean(0) for b in np.unique(meta['batch'][idx['train']])}
+            mean=torch.stack(list(means.values())).mean(0)
+            tx=tx-torch.stack([means[int(b)] for b in meta['batch'][idx['train']]])
+        else: mean=tx.mean(0); tx=tx-mean
+        std=tx.std(0).clamp_min(1e-5) if spec.get('standardize',False) else torch.ones_like(mean)
+        tx=tx/std
+        vx=x[va]-mean; vx=vx/std
         keys=meta['y'][idx['train']]*len(meta['batch_values'])+meta['batch'][idx['train']];counts=np.bincount(keys)
         w=torch.tensor(1/counts[keys],device='cuda');w=w/w.sum()
         centers=tx[torch.multinomial(w,min(spec.get('centers',1024),len(tr)),replacement=False)]
@@ -43,7 +51,7 @@ def main():
                 m=classification_metrics(y[va].cpu().tolist(),scores.argmax(1).cpu().tolist(),labels)
                 history.append({'gamma':gamma,'alpha':alpha,'macro_f1':m['macro_f1']})
                 if m['macro_f1']>best:best=m['macro_f1'];bestcoef=coef;bestgamma=gamma;bestalpha=alpha
-        ex=(x[te]-mean)/std;z=torch.exp(-bestgamma*torch.cdist(ex,centers).square()/denom)
+        ex=x[te]-mean; ex=ex/std; z=torch.exp(-bestgamma*torch.cdist(ex,centers).square()/denom)
         if spec.get('linear',False):z=torch.cat([z,ex/ex.shape[1]**.5],1)
         z=torch.cat([z,torch.ones(len(z),1,device='cuda',dtype=x.dtype)],1);scores=z@bestcoef
         m=classification_metrics(y[te].cpu().tolist(),scores.argmax(1).cpu().tolist(),labels);m.update(test_batch=fold,val_batch=valbatch,best_val_f1=best,best_alpha=bestalpha,best_gamma=bestgamma,elapsed_seconds=time.perf_counter()-start)
