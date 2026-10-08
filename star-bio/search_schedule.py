@@ -42,7 +42,7 @@ def main():
             save(folder/'spec.json',spec)
             env={**os.environ,'CUDA_VISIBLE_DEVICES':str(gpu),'PYTHONIOENCODING':'utf-8','OMP_NUM_THREADS':'2','MKL_NUM_THREADS':'2'}
             log=(folder/'launcher.log').open('w',encoding='utf-8')
-            proc=subprocess.Popen([sys.executable,'-u',str(ROOT/({'linear':'search_linear.py','kernel':'search_kernel.py','knn':'search_knn.py','align':'search_align.py','pca':'search_pca.py'}.get(spec.get('runner'),'search_train.py'))),'--spec',str(folder/'spec.json'),'--out',str(folder)],cwd=ROOT.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
+            proc=subprocess.Popen([sys.executable,'-u',str(ROOT/({'linear':'search_linear.py','kernel':'search_kernel.py','knn':'search_knn.py','align':'search_align.py','pca':'search_pca.py','select':'search_select.py','concat':'search_concat.py','cellval':'search_kernel_cellval.py'}.get(spec.get('runner'),'search_train.py'))),'--spec',str(folder/'spec.json'),'--out',str(folder)],cwd=ROOT.parent,env=env,stdout=log,stderr=subprocess.STDOUT)
             active[proc.pid]={'process':proc,'log':log,'name':spec['name'],'gpu':gpu,'out':str(folder)};launched.add(spec['name'])
             print(f'LAUNCH gpu={gpu} free_mib={free} pid={proc.pid} {spec["name"]}',flush=True)
         save(state_path,{'pid':os.getpid(),'active':[{'pid':pid,**{k:v for k,v in j.items() if k not in ['process','log']}} for pid,j in active.items()],'finished':done,'pending':[s['name'] for s in queue if s['name'] not in launched]})

@@ -32,11 +32,28 @@ def main():
         else: mean=tx.mean(0); tx=tx-mean
         std=tx.std(0).clamp_min(1e-5) if spec.get('standardize',False) else torch.ones_like(mean)
         tx=tx/std
-        vx=x[va]-mean; vx=vx/std
+        if spec.get('partition_norm',False):
+            val_raw=x[va]; val_mean=val_raw.mean(0); val_std=val_raw.std(0).clamp_min(1e-5) if spec.get('standardize',False) else torch.ones_like(mean)
+            vx=(val_raw-val_mean)/val_std
+        else:
+            vx=(x[va]-mean)/std
         keys=meta['y'][idx['train']]*len(meta['batch_values'])+meta['batch'][idx['train']];counts=np.bincount(keys)
         w=torch.tensor(1/counts[keys],device='cuda');w=w/w.sum()
-        centers=tx[torch.multinomial(w,min(spec.get('centers',1024),len(tr)),replacement=False)]
-        denom=torch.cdist(centers[:256],centers[:256]).square().median().clamp_min(1e-6)
+        ncent=min(spec.get('centers',1024),len(tr))
+        if spec.get('center_mode','weighted') == 'stratified':
+            selected=[]
+            per=max(1,ncent//(len(labels)*len(meta['batch_values'])))
+            keys=meta['y'][idx['train']]*len(meta['batch_values'])+meta['batch'][idx['train']]
+            for key in np.unique(keys):
+                pool=np.flatnonzero(keys==key)
+                take=min(per,len(pool))
+                selected.extend(pool[torch.randperm(len(pool),device='cuda')[:take].cpu().tolist()])
+            if len(selected)<ncent:
+                rest=np.setdiff1d(np.arange(len(tr)),np.asarray(selected)); selected.extend(rest[:ncent-len(selected)])
+            centers=tx[torch.tensor(selected[:ncent],device='cuda')]
+        else:
+            centers=tx[torch.multinomial(w,ncent,replacement=False)]
+        denom=torch.cdist(centers[:min(512,len(centers))],centers[:min(512,len(centers))]).square().median().clamp_min(1e-6)
         dt=torch.cdist(tx,centers).square()/denom;dv=torch.cdist(vx,centers).square()/denom
         best=-1;history=[]
         for gamma in spec.get('gammas',[.1,.3,1.,3.,10.]):
@@ -51,7 +68,12 @@ def main():
                 m=classification_metrics(y[va].cpu().tolist(),scores.argmax(1).cpu().tolist(),labels)
                 history.append({'gamma':gamma,'alpha':alpha,'macro_f1':m['macro_f1']})
                 if m['macro_f1']>best:best=m['macro_f1'];bestcoef=coef;bestgamma=gamma;bestalpha=alpha
-        ex=x[te]-mean; ex=ex/std; z=torch.exp(-bestgamma*torch.cdist(ex,centers).square()/denom)
+        ex=x[te]
+        if spec.get('partition_norm',False):
+            ex=(ex-ex.mean(0))/(ex.std(0).clamp_min(1e-5) if spec.get('standardize',False) else torch.ones_like(mean))
+        else:
+            ex=(ex-mean)/std
+        z=torch.exp(-bestgamma*torch.cdist(ex,centers).square()/denom)
         if spec.get('linear',False):z=torch.cat([z,ex/ex.shape[1]**.5],1)
         z=torch.cat([z,torch.ones(len(z),1,device='cuda',dtype=x.dtype)],1);scores=z@bestcoef
         m=classification_metrics(y[te].cpu().tolist(),scores.argmax(1).cpu().tolist(),labels);m.update(test_batch=fold,val_batch=valbatch,best_val_f1=best,best_alpha=bestalpha,best_gamma=bestgamma,elapsed_seconds=time.perf_counter()-start)

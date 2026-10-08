@@ -67,6 +67,12 @@ class PatchTSTClassifier(nn.Module):
     def forward(self, x):
         if x.ndim != 3 or tuple(x.shape[1:]) != (3, self.n_points):
             raise ValueError(f"需要 [N, 3, {self.n_points}] 输入，收到 {tuple(x.shape)}")
+        z = self.encode(x)
+        return self.head(z)
+
+    def encode_patches(self, x):
+        if x.ndim != 3 or tuple(x.shape[1:]) != (3, self.n_points):
+            raise ValueError(f"需要 [N, 3, {self.n_points}] 输入，收到 {tuple(x.shape)}")
         z = self.revin_layer(x, torch.tensor(True, dtype=torch.bool, device=x.device)) if self.use_revin else x
         z = self.padding_patch_layer(z)
         b, c, s = z.size()
@@ -74,6 +80,11 @@ class PatchTSTClassifier(nn.Module):
         z = self.unfold(z)
         z = z.permute(0, 2, 1).reshape(b, c, -1, self.patch_len).permute(0, 1, 3, 2)
         z = self.encoder(z)  # [N, channels, d_model, patches]
+        return z
+
+    def encode(self, x):
+        z = self.encode_patches(x)
+        b = z.shape[0]
         if self.pooling == "segments":
             # Preserve the order of four non-overlapping spectral regions.
             z = torch.stack([part.mean(-1) for part in z.tensor_split(self.pool_segments, dim=-1)], dim=-1)
@@ -83,4 +94,4 @@ class PatchTSTClassifier(nn.Module):
         else:
             z = z.mean(dim=-1)
         z = z.reshape(b, -1)
-        return self.head(z)
+        return z
