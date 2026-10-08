@@ -28,6 +28,33 @@ def make_splits(meta, test_batch, val_batch=None):
     return indices, val_batch
 
 
+def make_lobo_splits(meta, test_batch):
+    """Leave one whole batch out: three batches train, one batch tests.
+
+    This split deliberately has no validation set. Hyperparameters must be
+    fixed before running the four folds, and the test batch is evaluated only
+    after fitting on all remaining samples.
+    """
+    values = meta["batch_values"]
+    if len(values) < 2:
+        raise ValueError("LOBO 至少需要 2 个批次")
+    if test_batch not in values:
+        raise ValueError(f"测试批次 {test_batch} 不存在，可选值: {values}")
+    test_id = values.index(test_batch)
+    batches, y = meta["batch"], meta["y"]
+    indices = {
+        "train": np.flatnonzero(batches != test_id),
+        "test": np.flatnonzero(batches == test_id),
+    }
+    expected = set(range(len(meta["labels"])))
+    for name, idx in indices.items():
+        missing = sorted(expected - set(y[idx]))
+        if missing:
+            labels = [meta["labels"][i] for i in missing]
+            raise ValueError(f"{name} 集缺少类别 {labels}；请补充相应批次数据")
+    return indices
+
+
 def limit_per_class(indices, y, limit, seed):
     """A deterministic small subset for smoke tests, preserving every class."""
     if limit is None:

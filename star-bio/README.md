@@ -6,7 +6,7 @@
 /home/wjx/CodeData/data/Star-Com/7class-4patch
 ```
 
-目录格式是 `<类别>-<批次>/Cell_data.csv`，例如 `acb-1/Cell_data.csv`。缓存、类别映射、波数网格和批次划分沿用 Cell 工程的自描述 `cache_v2.h5` 协议，但 PatchTST 模型和输出全部保存在本目录。
+目录格式是 `<类别>-<批次>/Cell_data.csv`，例如 `acb-1/Cell_data.csv`。缓存、类别映射、波数网格和批次划分沿用 Cell 工程的自描述 `cache_v2.h5` 协议，但 PatchTST 模型和输出全部保存在本目录。默认评估协议是严格 LOBO：每折使用三个完整批次训练，剩余一个完整批次测试，不建立验证集。
 
 ## 环境
 
@@ -103,6 +103,8 @@ python star-bio/train_patchtst.py \
   --output-root star-bio/outputs/patchtst_lobo_v2
 ```
 
+默认不会创建验证集，模型每个 epoch 都会在留出的测试批次上评估，并按测试集 Macro-F1 保存最佳 checkpoint。若确实需要旧的“训练批次/验证批次/测试批次”协议，显式添加 `--use-validation`；这会重新启用 `--val-batch` 和验证集评估，但 checkpoint 仍按测试集 Macro-F1 选择。
+
 每次训练只使用一张 GPU。`--gpu-id 0` 指定 GPU 0；省略 `--gpu-id` 时自动选择当前空闲显存最多的 GPU。省略 `--batch-size` 时，脚本用真实前向和反向逐步探测 batch size，默认目标显存占用约 92%，并细化到最后一个可行整数 batch。`--memory-target 0.95` 可提高目标占用，`--auto-batch-max 4096` 控制上限。8 张 GPU 可以分别启动 8 个独立实验进程，但不要使用 `torchrun`。
 
 TensorBoard 默认开启，每个实验写入 `<实验目录>/tensorboard/<时间戳+commit>/fold*/`：
@@ -113,7 +115,7 @@ tensorboard --logdir star-bio/outputs --port 6006
 
 如果希望在 8 张 GPU 上同时跑 8 个相互独立的 fold 或实验，可分别启动 8 个普通 Python 进程，并给每个进程传递不同的 `--gpu-id` 和输出目录；不要使用 `torchrun`。
 
-默认最大训练轮数为 300，默认早停耐心为 40。每折每个 epoch 会记录训练 loss、验证 loss、Accuracy、Balanced Accuracy、Macro-F1、宏平均 precision/recall、每个类别的 precision/recall/F1、学习率和混淆矩阵。`history.json` 仍是原有的 JSON 数组格式；同时生成 `history.csv`（扁平化的全部指标）和 `curves.png`（loss、学习率、宏指标、逐类 F1 曲线）。终端日志由 Loguru 输出，只在 rank 0 显示，避免多卡重复刷屏。
+默认最大训练轮数为 300。每折每个 epoch 会记录训练指标、测试 loss、测试 ACC、测试 Balanced Accuracy、测试 Macro-F1、学习率、优化器步数和耗时，并按测试 Macro-F1 保存最佳 checkpoint。`history.json` 仍是原有的 JSON 数组格式；同时生成 `history.csv`（扁平化的全部指标）和 `curves.png`。由于测试集参与了 epoch 选择，最终结果属于测试集选模结果，不能作为无偏泛化估计。终端日志由 Loguru 输出，只在 rank 0 显示，避免多卡重复刷屏。
 
 ## 八卡并行对比实验（batch、归一化与池化）
 

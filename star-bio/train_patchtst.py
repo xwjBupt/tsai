@@ -27,7 +27,7 @@ from dataset import SpectraDataset
 from metadata import load_meta
 from metrics import classification_metrics
 from prepare_data import SCHEMA_VERSION
-from splits import make_splits, limit_per_class
+from splits import make_lobo_splits, make_splits, limit_per_class
 from patchtst_model import PatchTSTClassifier
 
 
@@ -379,6 +379,13 @@ def save_history_artifacts(history, output, labels):
         "loss",
         "train_loss",
         "val_loss",
+        "train_acc",
+        "train_bacc",
+        "train_macro_f1",
+        "test_acc",
+        "test_bacc",
+        "test_macro_f1",
+        "test_loss",
         "lr",
         "learning_rate",
         "acc",
@@ -440,7 +447,7 @@ def save_history_artifacts(history, output, labels):
         ax.legend()
         ax = axes[1, 0]
         for key in ("acc", "bacc", "macro_f1"):
-            ax.plot(epochs, [row[key] for row in history], label=key)
+            ax.plot(epochs, [row.get(key, float("nan")) for row in history], label=key)
         ax.plot(
             epochs,
             [
@@ -577,7 +584,11 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     cfg.labels = meta["labels"]
     cfg.batch_values = meta["batch_values"]
     cfg.batch_size = probe_batch(cfg, device, args)
-    idx, val_batch = make_splits(meta, test_batch, args.val_batch)
+    if args.use_validation:
+        idx, val_batch = make_splits(meta, test_batch, args.val_batch)
+    else:
+        idx = make_lobo_splits(meta, test_batch)
+        val_batch = None
     seed_all(cfg.seed + test_batch)
     idx = {
         k: limit_per_class(v, meta["y"], args.limit_per_class, cfg.seed + i)
@@ -605,6 +616,7 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             "sampler": args.sampler,
             "batch_shift": args.batch_shift,
             "augmentation_strength": args.augmentation_strength,
+            "validation": args.use_validation,
         }
         save_json(out / "config.json", config_payload)
         np.savez_compressed(out / "splits.npz", **idx)
@@ -619,6 +631,7 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 "world_size": world(),
                 "sampler": args.sampler,
                 "batch_shift": args.batch_shift,
+                "validation": args.use_validation,
             },
         )
     loaders = {
@@ -678,6 +691,8 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
         model.train()
         total = 0.0
         seen = 0
+        train_true = []
+        train_pred = []
         it = tqdm(
             loaders["train"],
             desc=f"PatchTST fold {test_batch} epoch {epoch}/{cfg.epochs}",
@@ -691,7 +706,10 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             for g in opt.param_groups:
                 g["lr"] = lr_at(cfg, epoch)
             with torch.autocast(device_type=device.type, enabled=scaler.is_enabled()):
-                loss = nn.functional.cross_entropy(model(x), y, label_smoothing=0.05)
+                logits = model(x)
+                loss = nn.functional.cross_entropy(logits, y, label_smoothing=0.05)
+            train_true.extend(y.detach().cpu().tolist())
+            train_pred.extend(logits.detach().argmax(1).cpu().tolist())
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -708,17 +726,30 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
         epoch_train_seconds = time.perf_counter() - epoch_started
         training_seconds += epoch_train_seconds
         train_loss = reduce_train_loss(total, seen, device)
-        val = gather_eval(model, loaders["val"], device, cfg.labels)
+        train_metrics = classification_metrics(train_true, train_pred, cfg.labels)
+        # User-requested model selection rule: evaluate the held-out test
+        # batch every epoch and keep the checkpoint with the best test Macro-F1.
+        # This intentionally makes the reported test result a test-selected
+        # result rather than an unbiased generalization estimate.
+        epoch_test = gather_eval(model, loaders["test"], device, cfg.labels)
+        val = gather_eval(model, loaders["val"], device, cfg.labels) if args.use_validation else None
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         epoch_seconds = time.perf_counter() - epoch_started
         if main_process():
             current_lr = lr_at(cfg, epoch)
-            val.update(
+            record = dict(val or {})
+            record.update(
                 epoch=epoch,
                 loss=train_loss,
                 train_loss=train_loss,
-                val_loss=val["val_loss"],
+                train_acc=train_metrics["acc"],
+                train_bacc=train_metrics["bacc"],
+                train_macro_f1=train_metrics["macro_f1"],
+                test_acc=epoch_test["acc"],
+                test_bacc=epoch_test["bacc"],
+                test_macro_f1=epoch_test["macro_f1"],
+                test_loss=epoch_test["val_loss"],
                 lr=current_lr,
                 learning_rate=current_lr,
                 optimizer_steps=optimizer_steps,
@@ -729,20 +760,19 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 epoch_seconds=epoch_seconds,
                 elapsed_seconds=time.perf_counter() - fold_started,
             )
-            history.append(val)
+            if val is not None:
+                record["val_loss"] = val["val_loss"]
+            history.append(record)
             logger.info(
-                "fold={} epoch={}/{} train_loss={:.5f} val_loss={:.5f} acc={:.4f} bacc={:.4f} macro_f1={:.4f} lr={:.3e} updates={} train_s={:.1f}",
-                test_batch,
-                epoch,
-                cfg.epochs,
-                train_loss,
-                val["val_loss"],
-                val["acc"],
-                val["bacc"],
-                val["macro_f1"],
-                current_lr,
-                optimizer_steps,
-                epoch_train_seconds,
+                "fold={} epoch={}/{} train_loss={:.5f} train_macro_f1={:.4f} test_macro_f1={:.4f} val_loss={} acc={} bacc={} macro_f1={} lr={:.3e} updates={} train_s={:.1f}",
+                test_batch, epoch, cfg.epochs, train_loss,
+                train_metrics["macro_f1"],
+                epoch_test["macro_f1"],
+                f"{val['val_loss']:.5f}" if val is not None else "disabled",
+                f"{val['acc']:.4f}" if val is not None else "disabled",
+                f"{val['bacc']:.4f}" if val is not None else "disabled",
+                f"{val['macro_f1']:.4f}" if val is not None else "disabled",
+                current_lr, optimizer_steps, epoch_train_seconds,
             )
             state = model.state_dict()
             ck = {
@@ -761,9 +791,12 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
                 "test_indices": idx["test"].tolist(),
                 "limit_per_class": args.limit_per_class,
             }
-            if val["macro_f1"] > best:
-                best = val["macro_f1"]
+            selection_metric = epoch_test["macro_f1"]
+            if selection_metric > best:
+                best = selection_metric
                 stale = 0
+                ck["selection_metric"] = "test_macro_f1"
+                ck["selection_value"] = selection_metric
                 torch.save(ck, out / "best.pt")
             else:
                 stale += 1
@@ -771,33 +804,30 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
             save_history_artifacts(history, out, cfg.labels)
         if writer:
             writer.add_scalar("loss/train", train_loss, epoch)
-            writer.add_scalar("loss/validation", val["val_loss"], epoch)
-            writer.add_scalar("metrics/accuracy", val["acc"], epoch)
-            writer.add_scalar("metrics/balanced_accuracy", val["bacc"], epoch)
-            writer.add_scalar("metrics/macro_f1", val["macro_f1"], epoch)
-            writer.add_scalar(
-                "metrics/macro_precision",
-                val["report"]["macro avg"]["precision"],
-                epoch,
-            )
-            writer.add_scalar(
-                "metrics/macro_recall", val["report"]["macro avg"]["recall"], epoch
-            )
+            writer.add_scalar("metrics/train_accuracy", train_metrics["acc"], epoch)
+            writer.add_scalar("metrics/train_balanced_accuracy", train_metrics["bacc"], epoch)
+            writer.add_scalar("metrics/train_macro_f1", train_metrics["macro_f1"], epoch)
+            writer.add_scalar("metrics/test_accuracy", epoch_test["acc"], epoch)
+            writer.add_scalar("metrics/test_balanced_accuracy", epoch_test["bacc"], epoch)
+            writer.add_scalar("metrics/test_macro_f1", epoch_test["macro_f1"], epoch)
+            writer.add_scalar("loss/test", epoch_test["val_loss"], epoch)
+            if val is not None:
+                writer.add_scalar("loss/validation", val["val_loss"], epoch)
+                writer.add_scalar("metrics/accuracy", val["acc"], epoch)
+                writer.add_scalar("metrics/balanced_accuracy", val["bacc"], epoch)
+                writer.add_scalar("metrics/macro_f1", val["macro_f1"], epoch)
+                writer.add_scalar("metrics/macro_precision", val["report"]["macro avg"]["precision"], epoch)
+                writer.add_scalar("metrics/macro_recall", val["report"]["macro avg"]["recall"], epoch)
             writer.add_scalar("optimization/learning_rate", current_lr, epoch)
-            for label in cfg.labels:
-                writer.add_scalar(
-                    f"class/{label}/precision", val["report"][label]["precision"], epoch
-                )
-                writer.add_scalar(
-                    f"class/{label}/recall", val["report"][label]["recall"], epoch
-                )
-                writer.add_scalar(
-                    f"class/{label}/f1", val["report"][label]["f1-score"], epoch
-                )
+            if val is not None:
+                for label in cfg.labels:
+                    writer.add_scalar(f"class/{label}/precision", val["report"][label]["precision"], epoch)
+                    writer.add_scalar(f"class/{label}/recall", val["report"][label]["recall"], epoch)
+                    writer.add_scalar(f"class/{label}/f1", val["report"][label]["f1-score"], epoch)
             for key in ("optimizer_steps", "epoch_optimizer_steps", "batches_seen"):
-                writer.add_scalar(f"optimization/{key}", val[key], epoch)
+                writer.add_scalar(f"optimization/{key}", record[key], epoch)
             for key in ("train_seconds", "total_train_seconds", "epoch_seconds", "elapsed_seconds"):
-                writer.add_scalar(f"timing/{key}", val[key], epoch)
+                writer.add_scalar(f"timing/{key}", record[key], epoch)
             writer.flush()
         if stale >= cfg.patience:
             break
@@ -806,7 +836,9 @@ def run(args, test_batch, meta, device, experiment_root, experiment_meta):
     result = gather_eval(model, loaders["test"], device, cfg.labels)
     if main_process():
         result["test_loss"] = result.pop("val_loss")
-        result.update(test_batch=test_batch, val_batch=val_batch, best_val_f1=best,
+        result.update(test_batch=test_batch, val_batch=val_batch, validation=args.use_validation,
+                      selection_metric="test_macro_f1",
+                      best_test_macro_f1=best,
                       best_epoch=ck["epoch"], best_optimizer_steps=ck["optimizer_steps"],
                       optimizer_steps=optimizer_steps, batches_seen=batches_seen,
                       total_train_seconds=training_seconds,
@@ -829,6 +861,11 @@ def main():
     g.add_argument("--fold", type=int)
     g.add_argument("--all-folds", action="store_true")
     p.add_argument("--val-batch", type=int)
+    p.add_argument(
+        "--use-validation",
+        action="store_true",
+        help="启用旧的验证批次模式；默认严格使用三批训练、一批测试",
+    )
     p.add_argument("--data-root", default=Config().data_root)
     p.add_argument("--cache", default=Config().cache_path)
     p.add_argument("--output-root", help="实验父目录，实验名会自动追加时间戳")
@@ -883,23 +920,29 @@ def main():
         p.error("augmentation-strength 必须为非负有限数值")
     if a.pool_segments < 1 or a.heads < 1 or a.d_model < 1 or a.d_model % a.heads:
         p.error("pool-segments/heads/d-model 无效")
+    if not a.use_validation and a.val_batch is not None:
+        p.error("默认无验证集；只有使用 --use-validation 时才能指定 --val-batch")
     os.environ["PATCHTST_DEVICE"] = a.device
     device = select_gpu(a)
     setup_logger()
     experiment_root, experiment_meta = prepare_experiment(a)
     logger.info(
-        "实验={} debug={} commit={} device={} epochs={} data={}",
+        "实验={} debug={} commit={} device={} epochs={} validation={} data={}",
         experiment_meta["experiment_id"],
         experiment_meta["debug"],
         experiment_meta["commit"] or "none",
         device,
         a.epochs,
+        a.use_validation,
         a.data_root,
     )
     meta = load_meta(a.cache, check_sources=True, data_root=a.data_root)
     folds = meta["batch_values"] if a.all_folds else [a.fold or meta["batch_values"][0]]
     for fold in folds:
-        make_splits(meta, fold, a.val_batch)
+        if a.use_validation:
+            make_splits(meta, fold, a.val_batch)
+        else:
+            make_lobo_splits(meta, fold)
     fold_results = {
         fold: run(a, fold, meta, device, experiment_root, experiment_meta)
         for fold in folds
